@@ -4,7 +4,6 @@ UI参照SmartRefreshLayout仿写，基于compose实现。有下拉刷新&上拉�
 初始来源是
 https://github.com/Loren-Moon/ComposeSmartRefresh
 在这个基础上我简化了api，添加了自己开发中需要的状态
-```
 
 ```kotlin
 val listState = rememberLazyListState()
