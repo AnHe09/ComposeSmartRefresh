@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -62,20 +63,22 @@ import kotlin.math.absoluteValue
 /**
  * Created by Loren on 2022/6/13
  * Description -> 支持下拉刷新&加载更多的通用组件
- * [state] 刷新以及加载的状态
- * [onRefresh] 刷新的回调
- * [onLoadMore] 加载更多的回调
- * [headerIndicator] 头布局
- * [footerIndicator] 尾布局
- * [contentScrollState] 当内容布局可滚动时，传入该布局的滚动状态，可以控制滚动，加载更多成功时仅隐藏尾布局，新内容直接显示；自动加载更多也依赖此状态
+ * [state] 刷新以及加载的状态容器，仅用于配置和读取状态
+ * [onRefresh] 刷新回调，返回 [SmartSwipeResult] 表示请求结果
+ * [onLoadMore] 加载更多回调，返回 [SmartSwipeResult.NoMore] 可停止后续加载
+ * [initialRefresh] 是否在首次组合时自动触发刷新
+ * [headerIndicator] 自定义头部指示器
+ * [footerIndicator] 自定义尾部指示器
+ * [contentScrollState] 内容滚动状态；传入后组件才能检测列表是否到达底部
  * [content] 内容布局
  */
 @Composable
 fun SmartSwipeRefresh(
     modifier: Modifier = Modifier,
-    state: SmartSwipeRefreshState,
-    onRefresh: (suspend () -> Unit)? = null,
-    onLoadMore: (suspend () -> Unit)? = null,
+    state: SmartSwipeRefreshState = rememberSmartSwipeRefreshState(),
+    onRefresh: (suspend () -> SmartSwipeResult)? = null,
+    onLoadMore: (suspend () -> SmartSwipeResult)? = null,
+    initialRefresh: Boolean = false,
     headerIndicator: @Composable (() -> Unit)? = { MyRefreshHeader(flag = state.refreshFlag) },
     footerIndicator: @Composable (() -> Unit)? = { MyRefreshFooter(flag = state.loadMoreFlag) },
     contentScrollState: ScrollableState? = null,
@@ -95,7 +98,7 @@ fun SmartSwipeRefresh(
         when (state.refreshFlag) {
             SmartSwipeStateFlag.REFRESHING -> {
                 state.animateIsOver = false
-                onRefresh?.invoke()
+                state.completeRefresh(executeSwipeAction(onRefresh))
             }
 
             SmartSwipeStateFlag.ERROR, SmartSwipeStateFlag.SUCCESS -> {
@@ -111,7 +114,7 @@ fun SmartSwipeRefresh(
         when (state.loadMoreFlag) {
             SmartSwipeStateFlag.REFRESHING -> {
                 state.animateIsOver = false
-                onLoadMore?.invoke()
+                state.completeLoadMore(executeSwipeAction(onLoadMore))
             }
 
             SmartSwipeStateFlag.ERROR, SmartSwipeStateFlag.SUCCESS -> {
@@ -119,12 +122,19 @@ fun SmartSwipeRefresh(
                 state.animateOffsetTo(0f)
             }
 
+            SmartSwipeStateFlag.NO_MORE -> {
+                if (state.autoBackAfterNoMoreData) {
+                    delay(500)
+                    state.animateOffsetTo(0f)
+                }
+            }
+
             else -> {}
         }
     }
 
     LaunchedEffect(Unit) {
-        if (state.needFirstRefresh) {
+        if (initialRefresh) {
             state.initRefresh()
         }
     }
@@ -174,8 +184,35 @@ fun SmartSwipeRefresh(
     }
 }
 
+/** 执行业务回调，并将普通异常转换为可展示的失败状态。 */
+private suspend fun executeSwipeAction(action: (suspend () -> SmartSwipeResult)?): SmartSwipeResult {
+    return try {
+        action?.invoke() ?: SmartSwipeResult.Success
+    } catch (exception: CancellationException) {
+        throw exception
+    } catch (exception: Exception) {
+        SmartSwipeResult.Error
+    }
+}
+
+/** 供自定义头部和尾部指示器展示的只读状态。 */
 enum class SmartSwipeStateFlag {
-    IDLE, REFRESHING, SUCCESS, ERROR, TIPS_DOWN, TIPS_RELEASE
+    IDLE, REFRESHING, SUCCESS, ERROR, NO_MORE, TIPS_DOWN, TIPS_RELEASE
+}
+
+/**
+ * 刷新或加载更多回调的执行结果。
+ * [NoMore] 仅对加载更多有意义，表示当前页面没有下一页数据。
+ */
+sealed interface SmartSwipeResult {
+    /** 请求成功，允许后续继续加载。 */
+    data object Success : SmartSwipeResult
+
+    /** 请求失败，尾部或头部会显示错误状态。 */
+    data object Error : SmartSwipeResult
+
+    /** 没有更多数据，后续自动加载和手动加载都会被忽略。 */
+    data object NoMore : SmartSwipeResult
 }
 
 /**
@@ -185,13 +222,20 @@ enum class SmartSwipeStateFlag {
  * [ThresholdScrollStrategy.Fixed] 阈值为固定数值
  */
 sealed interface ThresholdScrollStrategy {
+    /** 不额外展开指示器。 */
     data object None : ThresholdScrollStrategy
 
+    /** 不限制指示器展开高度。 */
     data object UnLimited : ThresholdScrollStrategy
 
+    /** 将指示器展开高度限制为指定 px 值。 */
     data class Fixed(val height: Float) : ThresholdScrollStrategy
 }
 
+/**
+ * 创建并记住 [SmartSwipeRefreshState]。
+ * 仅在需要修改默认交互配置或自定义指示器时显式创建；一般场景可省略 `state` 参数。
+ */
 @Composable
 fun rememberSmartSwipeRefreshState(): SmartSwipeRefreshState {
     return remember {
@@ -199,88 +243,176 @@ fun rememberSmartSwipeRefreshState(): SmartSwipeRefreshState {
     }
 }
 
+/**
+ * SmartSwipeRefresh 的可配置状态。
+ * 刷新和加载的运行状态由组件维护，业务只需通过回调返回 [SmartSwipeResult]。
+ */
 class SmartSwipeRefreshState {
     /**
-     * 拖动粘性
+     * 拖动距离的阻尼系数，范围通常为 0 到 1；值越小，指示器移动越慢。
      */
     var stickinessLevel = 0.5f
 
     /**
-     * 头布局拖拽策略
+     * 拖动时头部指示器允许展开的最大高度策略。
      */
     var dragHeaderIndicatorStrategy: ThresholdScrollStrategy = ThresholdScrollStrategy.UnLimited
 
     /**
-     * 尾布局拖拽策略
+     * 拖动时尾部指示器允许展开的最大高度策略。
      */
     var dragFooterIndicatorStrategy: ThresholdScrollStrategy = ThresholdScrollStrategy.UnLimited
 
     /**
-     * 头布局快速滑动策略
+     * 快速滑动时头部指示器允许展开的最大高度策略。
      */
     var flingHeaderIndicatorStrategy: ThresholdScrollStrategy = ThresholdScrollStrategy.None
 
     /**
-     * 尾布局快速滑动策略
+     * 快速滑动时尾部指示器允许展开的最大高度策略。
      */
     var flingFooterIndicatorStrategy: ThresholdScrollStrategy = ThresholdScrollStrategy.None
 
     /**
-     * 首次进入页面是否触发刷新动画以及回调
-     */
-    var needFirstRefresh = false
-
-    /**
-     * 头布局测量高度
+     * 头部指示器的实际高度，由组件内部测量。
      */
     var headerHeight = 0f
+        internal set
 
     /**
-     * 尾布局测量高度
+     * 尾部指示器的实际高度，由组件内部测量。
      */
     var footerHeight = 0f
+        internal set
 
     /**
-     * 是否开启刷新
+     * 是否允许下拉刷新。
      */
     var enableRefresh = true
 
     /**
-     * 是否开启加载更多
+     * 是否允许手动上拉加载更多。
      */
     var enableLoadMore = true
 
     /**
-     * 内容滑动到底部时是否自动加载更多
+     * 内容滑动到底部时是否自动加载更多，默认开启。
      */
     var enableAutoLoadMore = true
 
-    // fling释放的时候header|footer是否有显示 显示则刷新 没显示动画回到原位
-    var releaseIsEdge = false
-    var refreshFlag by mutableStateOf(SmartSwipeStateFlag.IDLE)
-    var loadMoreFlag by mutableStateOf(SmartSwipeStateFlag.IDLE)
+    /**
+     * 已加载全部数据后，后续上拉或滑到底部时是否继续展示“没有更多数据”提示，默认开启。
+     * 该配置只控制提示展示，不会再次触发加载更多回调。
+     */
+    var showNoMoreData = true
 
     /**
-     * 动画结束
+     * “没有更多数据”提示展示后是否自动回到原位，默认开启。
+     * 关闭后尾部提示会停留在展开位置，直到用户向下滚动收起或刷新重置。
      */
+    var autoBackAfterNoMoreData = true
+
+    /** fling 释放时是否已经拉出头部或尾部指示器，由组件内部维护。 */
+    var releaseIsEdge = false
+        internal set
+
+    /** 当前刷新指示器状态，只读；状态由组件根据回调结果自动更新。 */
+    var refreshFlag by mutableStateOf(SmartSwipeStateFlag.IDLE)
+        internal set
+
+    /** 当前加载更多指示器状态，只读；状态由组件根据回调结果自动更新。 */
+    var loadMoreFlag by mutableStateOf(SmartSwipeStateFlag.IDLE)
+        internal set
+
+    /** 是否已加载全部数据；刷新开始时会自动重置。 */
+    var hasNoMoreData by mutableStateOf(false)
+        private set
+
+    /** 指示器动画是否结束，由组件内部维护。 */
     var animateIsOver by mutableStateOf(true)
+        internal set
     private val _indicatorOffset = Animatable(0f)
     private val mutatorMutex = MutatorMutex()
 
+    /** 当前指示器相对于静止位置的偏移量，单位为 px；正数为头部，负数为尾部。 */
     val indicatorOffset: Float
         get() = _indicatorOffset.value
 
+    /** 当前是否正在执行刷新、加载更多或指示器动画。 */
     fun isLoading() = !animateIsOver || refreshFlag == SmartSwipeStateFlag.REFRESHING || loadMoreFlag == SmartSwipeStateFlag.REFRESHING
 
+    /** 当前是否允许开始加载更多。 */
+    internal fun canLoadMore(): Boolean {
+        return enableLoadMore && !hasNoMoreData && !isLoading()
+    }
+
+    /** 当前触底时是否应展示已加载全部数据的尾部提示。 */
+    internal fun shouldShowNoMoreData(): Boolean {
+        return hasNoMoreData && showNoMoreData && footerHeight != 0f
+    }
+
+    /** 尝试开始一次加载更多，返回 false 表示当前不可加载。 */
     internal fun startLoadMore(): Boolean {
-        if (!enableLoadMore || isLoading()) {
+        if (!canLoadMore()) {
             return false
         }
         loadMoreFlag = SmartSwipeStateFlag.REFRESHING
         return true
     }
 
-    suspend fun animateOffsetTo(offset: Float) {
+    /** 开始一次刷新，并恢复加载更多能力。 */
+    internal fun startRefresh() {
+        hasNoMoreData = false
+        if (loadMoreFlag == SmartSwipeStateFlag.NO_MORE) {
+            loadMoreFlag = SmartSwipeStateFlag.IDLE
+        }
+        refreshFlag = SmartSwipeStateFlag.REFRESHING
+    }
+
+    /** 将刷新回调结果转换为头部指示器状态。 */
+    internal fun completeRefresh(result: SmartSwipeResult) {
+        refreshFlag = if (result == SmartSwipeResult.Error) SmartSwipeStateFlag.ERROR else SmartSwipeStateFlag.SUCCESS
+    }
+
+    /** 将加载更多回调结果转换为尾部指示器状态。 */
+    internal fun completeLoadMore(result: SmartSwipeResult) {
+        loadMoreFlag = when (result) {
+            SmartSwipeResult.Success -> SmartSwipeStateFlag.SUCCESS
+            SmartSwipeResult.Error -> SmartSwipeStateFlag.ERROR
+            SmartSwipeResult.NoMore -> {
+                hasNoMoreData = true
+                animateIsOver = true
+                SmartSwipeStateFlag.NO_MORE
+            }
+        }
+    }
+
+    /**
+     * 展开“没有更多数据”尾部提示，且始终保留 [SmartSwipeStateFlag.NO_MORE] 状态。
+     * 此方法只提供视觉反馈，不会恢复加载能力或执行加载更多回调。
+     */
+    internal suspend fun showNoMoreData() {
+        if (!shouldShowNoMoreData()) {
+            return
+        }
+
+        loadMoreFlag = SmartSwipeStateFlag.NO_MORE
+        animateIsOver = false
+        try {
+            mutatorMutex.mutate {
+                _indicatorOffset.animateTo(-footerHeight)
+            }
+            if (autoBackAfterNoMoreData) {
+                delay(500)
+                animateOffsetTo(0f)
+            }
+        } finally {
+            animateIsOver = true
+        }
+    }
+
+    /** 将指示器平滑移动到指定的 px 偏移量。 */
+    internal suspend fun animateOffsetTo(offset: Float) {
         mutatorMutex.mutate {
             _indicatorOffset.animateTo(offset) {
                 if (this.value == 0f) {
@@ -290,31 +422,34 @@ class SmartSwipeRefreshState {
         }
     }
 
-    suspend fun snapOffsetTo(offset: Float) {
+    /** 将指示器立即移动到指定的 px 偏移量，并更新提示状态。 */
+    internal suspend fun snapOffsetTo(offset: Float) {
         mutatorMutex.mutate(MutatePriority.UserInput) {
             _indicatorOffset.snapTo(offset)
 
             if (indicatorOffset >= headerHeight) {
                 refreshFlag = SmartSwipeStateFlag.TIPS_RELEASE
-            } else if (indicatorOffset <= -footerHeight) {
+            } else if (indicatorOffset <= -footerHeight && !hasNoMoreData) {
                 loadMoreFlag = SmartSwipeStateFlag.TIPS_RELEASE
             } else {
                 if (indicatorOffset > 0) {
                     refreshFlag = SmartSwipeStateFlag.TIPS_DOWN
                 }
-                if (indicatorOffset < 0) {
+                if (indicatorOffset < 0 && !hasNoMoreData) {
                     loadMoreFlag = SmartSwipeStateFlag.TIPS_DOWN
                 }
             }
         }
     }
 
-    suspend fun initRefresh() {
+    /** 开始一次首次刷新，并清除上一次加载更多的结束状态。 */
+    internal suspend fun initRefresh() {
         snapOffsetTo(headerHeight)
-        refreshFlag = SmartSwipeStateFlag.REFRESHING
+        startRefresh()
     }
 
-    fun strategyIndicatorHeight(strategy: ThresholdScrollStrategy): Float = when (strategy) {
+    /** 根据阈值策略计算指示器允许展开的高度。 */
+    internal fun strategyIndicatorHeight(strategy: ThresholdScrollStrategy): Float = when (strategy) {
         ThresholdScrollStrategy.None -> 0f
         is ThresholdScrollStrategy.Fixed -> strategy.height
         else -> Float.MAX_VALUE
@@ -349,6 +484,12 @@ private class SmartSwipeRefreshNestedScrollConnection(
     override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
         return when {
             state.isLoading() -> Offset.Zero
+            available.y < 0 && state.shouldShowNoMoreData() -> {
+                coroutineScope.launch {
+                    state.showNoMoreData()
+                }
+                available
+            }
             available.y < 0 &&
                 hasScrollableContent &&
                 hasLoadMoreCallback &&
@@ -369,7 +510,7 @@ private class SmartSwipeRefreshNestedScrollConnection(
                 scroll(canConsumed)
             }
 
-            available.y < 0 && state.enableLoadMore && state.footerHeight != 0f -> {
+            available.y < 0 && state.canLoadMore() && state.footerHeight != 0f -> {
                 val canConsumed = if (source == NestedScrollSource.Fling) {
                     (available.y * state.stickinessLevel).coerceAtLeast(-state.strategyIndicatorHeight(state.flingFooterIndicatorStrategy) - state.indicatorOffset)
                 } else {
@@ -402,7 +543,7 @@ private class SmartSwipeRefreshNestedScrollConnection(
 
         if (state.indicatorOffset >= state.headerHeight && state.releaseIsEdge) {
             if (state.refreshFlag != SmartSwipeStateFlag.REFRESHING) {
-                state.refreshFlag = SmartSwipeStateFlag.REFRESHING
+                state.startRefresh()
                 state.animateOffsetTo(state.headerHeight)
                 return available
             }
@@ -422,6 +563,10 @@ private class SmartSwipeRefreshNestedScrollConnection(
         if (state.isLoading()) {
             return Velocity.Zero
         }
+        if (available.y < 0 && state.shouldShowNoMoreData()) {
+            state.showNoMoreData()
+            return available
+        }
         if (hasScrollableContent &&
             hasLoadMoreCallback &&
             available.y < 0 &&
@@ -435,7 +580,10 @@ private class SmartSwipeRefreshNestedScrollConnection(
             state.refreshFlag = SmartSwipeStateFlag.IDLE
             state.animateOffsetTo(0f)
         }
-        if (state.loadMoreFlag != SmartSwipeStateFlag.REFRESHING && state.indicatorOffset < 0) {
+        if (state.loadMoreFlag != SmartSwipeStateFlag.REFRESHING &&
+            state.loadMoreFlag != SmartSwipeStateFlag.NO_MORE &&
+            state.indicatorOffset < 0
+        ) {
             state.loadMoreFlag = SmartSwipeStateFlag.IDLE
             state.animateOffsetTo(0f)
         }
@@ -458,6 +606,10 @@ private fun SubComposeSmartSwipeRefresh(
     }
 }
 
+/**
+ * 默认的下拉刷新指示器。
+ * [flag] 由 [SmartSwipeRefreshState.refreshFlag] 提供；[isNeedTimestamp] 控制是否展示最近刷新时间。
+ */
 @Composable
 fun MyRefreshHeader(flag: SmartSwipeStateFlag, isNeedTimestamp: Boolean = true) {
     var lastRecordTime by remember {
@@ -495,6 +647,7 @@ fun MyRefreshHeader(flag: SmartSwipeStateFlag, isNeedTimestamp: Boolean = true) 
                         Icons.Default.Warning
                     }
 
+                    SmartSwipeStateFlag.NO_MORE -> Icons.Default.Done
                     SmartSwipeStateFlag.TIPS_DOWN -> Icons.Default.KeyboardArrowDown
                     SmartSwipeStateFlag.TIPS_RELEASE -> Icons.Default.KeyboardArrowDown
                 }, contentDescription = null
@@ -505,6 +658,7 @@ fun MyRefreshHeader(flag: SmartSwipeStateFlag, isNeedTimestamp: Boolean = true) 
                         SmartSwipeStateFlag.REFRESHING -> "刷新中..."
                         SmartSwipeStateFlag.SUCCESS -> "刷新成功"
                         SmartSwipeStateFlag.ERROR -> "刷新失败"
+                        SmartSwipeStateFlag.NO_MORE -> "刷新完成"
                         SmartSwipeStateFlag.IDLE, SmartSwipeStateFlag.TIPS_DOWN -> "下拉可以刷新"
                         SmartSwipeStateFlag.TIPS_RELEASE -> "释放立即刷新"
                     }, fontSize = 18.sp
@@ -518,6 +672,10 @@ fun MyRefreshHeader(flag: SmartSwipeStateFlag, isNeedTimestamp: Boolean = true) 
     }
 }
 
+/**
+ * 默认的上拉加载指示器。
+ * [flag] 由 [SmartSwipeRefreshState.loadMoreFlag] 提供；[isNeedTimestamp] 控制是否展示最近加载时间。
+ */
 @Composable
 fun MyRefreshFooter(flag: SmartSwipeStateFlag, isNeedTimestamp: Boolean = true) {
     var lastRecordTime by remember {
@@ -555,6 +713,7 @@ fun MyRefreshFooter(flag: SmartSwipeStateFlag, isNeedTimestamp: Boolean = true) 
                         Icons.Default.Warning
                     }
 
+                    SmartSwipeStateFlag.NO_MORE -> Icons.Default.Done
                     SmartSwipeStateFlag.TIPS_DOWN -> Icons.Default.KeyboardArrowUp
                     SmartSwipeStateFlag.TIPS_RELEASE -> Icons.Default.KeyboardArrowUp
                 }, contentDescription = null
@@ -565,6 +724,7 @@ fun MyRefreshFooter(flag: SmartSwipeStateFlag, isNeedTimestamp: Boolean = true) 
                         SmartSwipeStateFlag.REFRESHING -> "正在加载..."
                         SmartSwipeStateFlag.SUCCESS -> "加载成功"
                         SmartSwipeStateFlag.ERROR -> "加载失败"
+                        SmartSwipeStateFlag.NO_MORE -> "没有更多数据"
                         SmartSwipeStateFlag.IDLE, SmartSwipeStateFlag.TIPS_DOWN -> "上拉加载更多"
                         SmartSwipeStateFlag.TIPS_RELEASE -> "释放立即加载"
                     }, fontSize = 18.sp

@@ -10,41 +10,49 @@ repositories {
 }
 
 dependencies {
-    implementation "io.github.loren-moon:composesmartrefresh:2.1.0"
+implementation "io.github.loren-moon:composesmartrefresh:2.1.0"
 }
 ```
 
 ```kotlin
-val refreshState = rememberSmartSwipeRefreshState()
+val listState = rememberLazyListState()
 SmartSwipeRefresh(
+    initialRefresh = true,
     onRefresh = {
-        // refresh
+        repository.refresh()
+        SmartSwipeResult.Success
     },
     onLoadMore = {
-        // loadMore
+        val hasMore = repository.loadNextPage()
+        if (hasMore) SmartSwipeResult.Success else SmartSwipeResult.NoMore
     },
-    state = refreshState,
-    headerIndicator = {
-        MyRefreshHeader(refreshState.refreshFlag, true)
-    },
-    footerIndicator = {
-        MyRefreshFooter(refreshState.loadMoreFlag, true)
-    }) {
-    
+    contentScrollState = listState
+) {
+    LazyColumn(state = listState) {
+        // items(...)
+    }
 }
 ```
 
-刷新开关`enableRefresh`
+回调正常返回后，组件自动显示成功状态；回调抛出异常时自动显示失败状态。加载更多返回`SmartSwipeResult.NoMore`后会显示“没有更多数据”，并停止自动和手动加载；下一次刷新会重新允许加载。默认会在后续上拉或滑到底部时再次展示“没有更多数据”提示，但不会再次调用加载回调。
 
-加载更多开关`enableLoadMore`
+默认配置已经开启下拉刷新、上拉加载和滑动到底部自动加载。只有需要改变交互策略或自定义指示器时，才创建状态：
 
-滑动到底部后自动加载更多开关`enableAutoLoadMore`，默认开启；关闭后仍可通过上拉手势触发加载更多。自动加载需要同时传入`contentScrollState`和`onLoadMore`。
+```kotlin
+val refreshState = rememberSmartSwipeRefreshState().apply {
+    enableRefresh = true
+    enableLoadMore = true
+    enableAutoLoadMore = false
+    showNoMoreData = true
+    autoBackAfterNoMoreData = true
+}
+```
 
-粘性设置`stickLevel`
+`enableAutoLoadMore`默认开启，自动加载需要同时传入`contentScrollState`和`onLoadMore`。关闭它后，仍可通过上拉手势触发加载更多。`showNoMoreData`默认开启；关闭后，已经没有更多数据时的后续触底不会展示尾部提示，也不会执行加载回调。`autoBackAfterNoMoreData`默认开启；关闭后提示展示后会停留在展开位置，直到用户向下滚动收起或刷新重置。
 
-滑动阈值设置`dragHeaderIndicatorStrategy`、`dragFooterIndicatorStrategy`、`flingHeaderIndicatorStrategy`、`flingFooterIndicatorStrategy`
+可用`headerIndicator`和`footerIndicator`自定义指示器，它们分别接收`refreshState.refreshFlag`和`refreshState.loadMoreFlag`。
 
-首次进入页面触发刷新动画自动加载数据`needFirstRefresh=true`
+使用`initialRefresh = true`可在首次展示时自动刷新。
 
 ## :camera_flash: Screenshots
 
