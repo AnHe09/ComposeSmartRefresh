@@ -38,6 +38,8 @@ SmartSwipeRefresh(
 
 加载更多开关`enableLoadMore`
 
+滑动到底部后自动加载更多开关`enableAutoLoadMore`，默认开启；关闭后仍可通过上拉手势触发加载更多。自动加载需要同时传入`contentScrollState`和`onLoadMore`。
+
 粘性设置`stickLevel`
 
 滑动阈值设置`dragHeaderIndicatorStrategy`、`dragFooterIndicatorStrategy`、`flingHeaderIndicatorStrategy`、`flingFooterIndicatorStrategy`

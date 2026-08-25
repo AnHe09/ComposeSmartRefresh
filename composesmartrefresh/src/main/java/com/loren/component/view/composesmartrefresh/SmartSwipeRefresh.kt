@@ -67,7 +67,7 @@ import kotlin.math.absoluteValue
  * [onLoadMore] 加载更多的回调
  * [headerIndicator] 头布局
  * [footerIndicator] 尾布局
- * [contentScrollState] 当内容布局可滚动时，传入该布局的滚动状态，可以控制滚动，加载更多成功时仅隐藏尾布局，新内容直接显示
+ * [contentScrollState] 当内容布局可滚动时，传入该布局的滚动状态，可以控制滚动，加载更多成功时仅隐藏尾布局，新内容直接显示；自动加载更多也依赖此状态
  * [content] 内容布局
  */
 @Composable
@@ -77,13 +77,18 @@ fun SmartSwipeRefresh(
     onRefresh: (suspend () -> Unit)? = null,
     onLoadMore: (suspend () -> Unit)? = null,
     headerIndicator: @Composable (() -> Unit)? = { MyRefreshHeader(flag = state.refreshFlag) },
-    footerIndicator: @Composable (() -> Unit)? = { MyRefreshHeader(flag = state.loadMoreFlag) },
+    footerIndicator: @Composable (() -> Unit)? = { MyRefreshFooter(flag = state.loadMoreFlag) },
     contentScrollState: ScrollableState? = null,
     content: @Composable () -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
-    val connection = remember(coroutineScope) {
-        SmartSwipeRefreshNestedScrollConnection(state, coroutineScope)
+    val connection = remember(coroutineScope, contentScrollState != null, onLoadMore != null) {
+        SmartSwipeRefreshNestedScrollConnection(
+            state = state,
+            coroutineScope = coroutineScope,
+            hasScrollableContent = contentScrollState != null,
+            hasLoadMoreCallback = onLoadMore != null
+        )
     }
 
     LaunchedEffect(state.refreshFlag) {
@@ -245,6 +250,11 @@ class SmartSwipeRefreshState {
      */
     var enableLoadMore = true
 
+    /**
+     * 内容滑动到底部时是否自动加载更多
+     */
+    var enableAutoLoadMore = true
+
     // fling释放的时候header|footer是否有显示 显示则刷新 没显示动画回到原位
     var releaseIsEdge = false
     var refreshFlag by mutableStateOf(SmartSwipeStateFlag.IDLE)
@@ -261,6 +271,14 @@ class SmartSwipeRefreshState {
         get() = _indicatorOffset.value
 
     fun isLoading() = !animateIsOver || refreshFlag == SmartSwipeStateFlag.REFRESHING || loadMoreFlag == SmartSwipeStateFlag.REFRESHING
+
+    internal fun startLoadMore(): Boolean {
+        if (!enableLoadMore || isLoading()) {
+            return false
+        }
+        loadMoreFlag = SmartSwipeStateFlag.REFRESHING
+        return true
+    }
 
     suspend fun animateOffsetTo(offset: Float) {
         mutatorMutex.mutate {
@@ -304,7 +322,10 @@ class SmartSwipeRefreshState {
 }
 
 private class SmartSwipeRefreshNestedScrollConnection(
-    val state: SmartSwipeRefreshState, private val coroutineScope: CoroutineScope
+    val state: SmartSwipeRefreshState,
+    private val coroutineScope: CoroutineScope,
+    private val hasScrollableContent: Boolean,
+    private val hasLoadMoreCallback: Boolean
 ) : NestedScrollConnection {
     override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
         return when {
@@ -328,6 +349,17 @@ private class SmartSwipeRefreshNestedScrollConnection(
     override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
         return when {
             state.isLoading() -> Offset.Zero
+            available.y < 0 &&
+                hasScrollableContent &&
+                hasLoadMoreCallback &&
+                state.enableAutoLoadMore &&
+                (source == NestedScrollSource.Drag || source == NestedScrollSource.Fling) &&
+                state.startLoadMore() -> {
+                coroutineScope.launch {
+                    state.animateOffsetTo(-state.footerHeight)
+                }
+                available
+            }
             available.y > 0 && state.enableRefresh && state.headerHeight != 0f -> {
                 val canConsumed = if (source == NestedScrollSource.Fling) {
                     (available.y * state.stickinessLevel).coerceAtMost(state.strategyIndicatorHeight(state.flingHeaderIndicatorStrategy) - state.indicatorOffset)
@@ -377,18 +409,27 @@ private class SmartSwipeRefreshNestedScrollConnection(
         }
 
         if (state.indicatorOffset <= -state.footerHeight && state.releaseIsEdge) {
-            if (state.loadMoreFlag != SmartSwipeStateFlag.REFRESHING) {
-                state.loadMoreFlag = SmartSwipeStateFlag.REFRESHING
+            if (state.startLoadMore()) {
                 state.animateOffsetTo(-state.footerHeight)
                 return available
             }
         }
+
         return super.onPreFling(available)
     }
 
     override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
         if (state.isLoading()) {
             return Velocity.Zero
+        }
+        if (hasScrollableContent &&
+            hasLoadMoreCallback &&
+            available.y < 0 &&
+            state.enableAutoLoadMore &&
+            state.startLoadMore()
+        ) {
+            state.animateOffsetTo(-state.footerHeight)
+            return available
         }
         if (state.refreshFlag != SmartSwipeStateFlag.REFRESHING && state.indicatorOffset > 0) {
             state.refreshFlag = SmartSwipeStateFlag.IDLE
