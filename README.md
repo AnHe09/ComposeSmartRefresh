@@ -1,17 +1,9 @@
 ## ComposeSmartRefresh
 UI参照SmartRefreshLayout仿写，基于compose实现。有下拉刷新&上拉加载功能(无需Paging3)，并且可设置拖动阈值以及自定义头尾布局。
 
-[详细介绍](https://juejin.cn/post/7113733273561333797)
-
-## 如何使用
-```gradle
-repositories {
-    mavenCentral()
-}
-
-dependencies {
-implementation "io.github.loren-moon:composesmartrefresh:2.1.0"
-}
+初始来源是
+https://github.com/Loren-Moon/ComposeSmartRefresh
+在这个基础上我简化了api，添加了自己开发中需要的状态
 ```
 
 ```kotlin
